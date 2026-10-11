@@ -1,0 +1,2 @@
+"""ResearchOS local research assistant."""
+

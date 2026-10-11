@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "researchos"
+version = "0.1.0"
+description = "A local-first, evidence-grounded research copilot"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "httpx>=0.27,<1",
+  "openai>=1.50,<3",
+  "pydantic-settings>=2.5,<3",
+  "uvicorn[standard]>=0.30,<1",
+  "python-multipart>=0.0.12,<1",
+  "pypdf>=5.3,<7",
+  "Pillow>=10,<13",
+  "pypdfium2>=4.30,<5",
+]
+
+[project.optional-dependencies]
+semantic-ranking = [
+  "torch>=2.0",
+  "adapters>=1.3,<2",
+]
+
+[project.scripts]
+researchos = "researchos.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+researchos = ["web/*"]
