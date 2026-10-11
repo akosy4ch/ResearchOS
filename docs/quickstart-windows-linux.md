@@ -6,12 +6,29 @@
 - Python 3.11 or newer. On Windows, enable **Add Python to PATH** in the Python installer.
 - Ollama for local model analysis. You can start ResearchOS without it and connect a compatible local model server later.
 
+## Install a local chat model
+
+Ollama is the simplest model setup on both systems. Install it from the official [Windows download](https://ollama.com/download/windows) or [Linux download](https://ollama.com/download/linux). ResearchOS does not install Ollama itself; its launcher installs the ResearchOS app and dependencies.
+
+You can download a model from ResearchOS after launching it: open **Model settings**, keep **Ollama** selected, connect to `http://127.0.0.1:11434/v1`, then use **Ollama library** to download a recommended model or enter its Ollama name. When the download finishes, choose it under **Installed chat models** and click **Use selected model**.
+
+Or download one in a terminal before or after launching ResearchOS:
+
+```sh
+ollama pull qwen3.5:4b
+ollama list
+```
+
+`qwen3.5:4b` is a compact starting model; Ollama lists its download at about 3.3–4.0 GB. Models also need working memory while generating, so check your available RAM and disk space before choosing a larger one. The [Ollama model library](https://ollama.com/library) lists other open-weight models. The optional **SPECTER2** setup in Model settings is a paper-ranking model, not the chat model.
+
+For a Hugging Face GGUF instead, use Model settings to download the `.gguf` file, install and start a compatible `llama-server` on your computer, then choose **llama.cpp server** and connect to its OpenAI-compatible address (the default shown is `http://127.0.0.1:8080/v1`). ResearchOS downloads the GGUF but does not start the llama.cpp server for you.
+
 ## Windows: first launch
 
 1. Install [Python](https://www.python.org/downloads/windows/) and [Ollama](https://ollama.com/download/windows) if needed.
 2. Download or clone this repository.
 3. Double-click **Start ResearchOS.bat**. It creates `.venv`, installs the app locally, starts Ollama's service if needed, runs startup checks, and opens the browser when ResearchOS is ready. If an instance already runs at port 8000, it opens that instance instead of creating a duplicate.
-4. In the app, open **Model settings**, select Ollama or connect another local OpenAI-compatible server, then install/select a chat model.
+4. Open **Model settings** and install/select a chat model as described above. The launcher starts Ollama's local service when it is installed but not already running.
 5. Create a project, enter a focused research question, and start a run. **Research runs** and **Agent team** show progress and the source-linked report. Open the finished report and use **Ask this report** to chat about its findings.
 6. Use **Find papers** to search a title, author, DOI, or topic across Crossref, Europe PMC, and OpenAlex (up to 100 records per index). Results are temporary; save only papers you want to keep. Existing records show links to saved reports and results.
 7. Open **PDF analysis** to add a full-text PDF. Select it in the left panel; run or retry analysis there, and the dossier and paper Q&A appear beside the PDF list. Findings and answers link to validated quotations and exact PDF pages. Copy a suggested citation or BibTeX from saved metadata and verify it with the publisher.

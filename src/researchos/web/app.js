@@ -216,7 +216,7 @@ function updateSelectedModelMemory() {
   const estimated = Number(size) / (1024 ** 3) + 2;
   const estimate = `Roughly ${estimated.toFixed(0)} GB or more with a short context; actual use varies.`;
   $("#model-picker-status").textContent = estimated >= 10
-    ? `${selected} · ${prettyBytes(size)} weights. ${estimate} This may be tight on a 16 GB Mac.`
+      ? `${selected} · ${prettyBytes(size)} weights. ${estimate} This may be tight on this device.`
     : `${selected} · ${prettyBytes(size)} weights. ${estimate}`;
   renderModelRoleMemory();
 }
@@ -242,7 +242,7 @@ function renderModelCatalog(data) {
   const activeDownload = Object.values(downloads).some((entry) => entry.status === "downloading");
   $("#ollama-custom-pull").disabled = !data.ollama_available || activeDownload;
   $("#model-catalog-status").textContent = data.ollama_available
-    ? "Recommended smaller models for this 16 GB Mac. Downloads can take time and use disk space."
+    ? "Recommended compact models. Downloads can take time and use disk space."
     : "Connect to Ollama to download from its library. Your llama.cpp server can still use installed models.";
   root.innerHTML = (data.models || []).map((item) => {
     const progress = downloads[item.name];
@@ -308,7 +308,7 @@ async function refreshHuggingFaceDownloads() {
     const jobs = Object.values(data.downloads || {});
     $("#hf-downloads").innerHTML = jobs.map((job) => {
       const percent = job.total ? Math.min(100, Math.floor(Number(job.completed || 0) * 100 / Number(job.total))) : 0;
-      return `<article class="hf-job"><div><strong>${escapeHTML(job.filename)}</strong><span>${escapeHTML(job.message)}${job.total ? ` · ${percent}%` : ""}</span></div><div class="model-download-progress"><span style="width:${job.status === "complete" ? 100 : percent}%"></span></div>${job.status === "complete" ? `<span class="hf-job-path">Saved on this Mac: ${escapeHTML(job.path)}</span><span class="hf-job-path">Use it with llama.cpp by pointing llama-server at this GGUF file.</span>` : ""}</article>`;
+      return `<article class="hf-job"><div><strong>${escapeHTML(job.filename)}</strong><span>${escapeHTML(job.message)}${job.total ? ` · ${percent}%` : ""}</span></div><div class="model-download-progress"><span style="width:${job.status === "complete" ? 100 : percent}%"></span></div>${job.status === "complete" ? `<span class="hf-job-path">Saved on this device: ${escapeHTML(job.path)}</span><span class="hf-job-path">Use it with llama.cpp by pointing llama-server at this GGUF file.</span>` : ""}</article>`;
     }).join("");
     if (jobs.some((job) => job.status === "downloading") && !state.hfDownloadTimer) {
       state.hfDownloadTimer = setInterval(refreshHuggingFaceDownloads, 1200);
@@ -316,7 +316,7 @@ async function refreshHuggingFaceDownloads() {
       clearInterval(state.hfDownloadTimer); state.hfDownloadTimer = null;
     }
     for (const job of jobs.filter((item) => item.status === "complete" && !item.notified)) {
-      job.notified = true; toast(`${job.filename} downloaded to this Mac.`);
+      job.notified = true; toast(`${job.filename} downloaded to this device.`);
     }
   } catch (error) {
     $("#hf-downloads").innerHTML = `<p class="model-catalog-status">Could not load download status: ${escapeHTML(error.message)}</p>`;
@@ -338,7 +338,7 @@ async function connectModelRuntime() {
     $("#model-label").textContent = result.models.length ? `${result.runtime} · ${result.selected_model}` : `${result.runtime} connected`;
     await loadModelCatalog();
     await loadModelRoleSettings();
-    toast(`Connected to ${result.runtime} on this Mac.`);
+    toast(`Connected to ${result.runtime} on this device.`);
   } catch (error) {
     $("#runtime-status").textContent = error.message;
     toast(error.message, "error");
@@ -574,7 +574,7 @@ function renderModelRoleMemory() {
   const warning = estimate >= 16;
   note.classList.toggle("warning", warning);
   note.textContent = warning
-    ? `Largest model assigned: ${biggest.name} · about ${estimate} GB or more at short context. This is likely to exceed a 16 GB Mac's practical memory budget.`
+    ? `Largest model assigned: ${biggest.name} · about ${estimate} GB or more at short context. This may exceed this device's available memory.`
     : `Largest model assigned: ${biggest.name} · roughly ${estimate} GB or more at short context. Task models run one at a time; actual use varies.`;
 }
 async function loadModelRoleSettings() {
@@ -625,7 +625,7 @@ function renderSpecter2Status(data) {
     ? `Ready for local semantic ranking${data.device ? ` · ${data.device.toUpperCase()}` : ""}.`
     : data.dependencies_ready
       ? "Python runtime is installed; model weights still need to be downloaded."
-      : "Optional model is not installed. Setup installs PyTorch, downloads about 450 MB of model weights, and keeps them on this Mac.");
+      : "Optional model is not installed. Setup installs PyTorch, downloads about 450 MB of model weights, and keeps them on this device.");
   progress.hidden = !active;
   progress.classList.toggle("indeterminate", data.status === "downloading");
   progress.querySelector("span").style.width = `${Math.max(8, Number(data.progress || 0))}%`;
@@ -742,7 +742,7 @@ async function loadAnalysisPaperList() {
 function renderAnalysisPaperList() {
   const root = $("#analysis-paper-list");
   if (!state.analysisPapers.length) {
-    root.innerHTML = `<div class="empty-state compact-empty"><div class="empty-icon">◈</div><strong>No PDFs attached yet</strong><span>Add a paper PDF. It will stay on this Mac.</span></div>`;
+    root.innerHTML = `<div class="empty-state compact-empty"><div class="empty-icon">◈</div><strong>No PDFs attached yet</strong><span>Add a paper PDF. It will stay on this device.</span></div>`;
     return;
   }
   root.innerHTML = state.analysisPapers.map((paper) => `<button type="button" class="analysis-paper-row ${state.analysisPaperId === paper.id ? "selected" : ""}" data-select-analysis-paper="${escapeHTML(paper.id)}" aria-current="${state.analysisPaperId === paper.id ? "true" : "false"}"><span class="analysis-paper-icon">PDF</span><span class="analysis-paper-copy"><strong>${escapeHTML(paper.title || paper.local_filename || "Local PDF")}</strong><span>${escapeHTML(paper.local_filename || "PDF attached")} · ${Number(paper.page_count || 0)} pages${paper.year ? ` · ${escapeHTML(paper.year)}` : ""}</span></span><span class="analysis-paper-chevron">›</span></button>`).join("");
