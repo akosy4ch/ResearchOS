@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -368,15 +369,19 @@ class ResearchOSApiTests(unittest.TestCase):
     def test_model_download_starts_only_for_catalog_models_without_selecting_them(self) -> None:
         selected_before = settings.model_name
         self.client.app.state.model_provider.available_models = AsyncMock(return_value=["qwen2.5:7b"])
+        pull_started = threading.Event()
         with (patch("researchos.main._ollama_api_base_or_error", new_callable=AsyncMock,
                     return_value="http://127.0.0.1:11434"),
-              patch("researchos.main._pull_ollama_model", new_callable=AsyncMock) as pull):
+              patch("researchos.main._pull_ollama_model",
+                    new_callable=lambda: AsyncMock(side_effect=lambda *_args: pull_started.set())) as pull):
             response = self.client.post("/api/models/pull", json={"model": "qwen3.5:4b"})
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["model"], "qwen3.5:4b")
         self.assertEqual(settings.model_name, selected_before)
         self.assertIn("qwen3.5:4b", self.client.app.state.ollama_pull_tasks)
-        pull.assert_not_awaited()
+        self.assertTrue(pull_started.wait(timeout=2), "background model download did not start")
+        pull.assert_awaited_once()
+        self.assertEqual(pull.await_args.args[:2], ("qwen3.5:4b", "http://127.0.0.1:11434"))
 
 
 if __name__ == "__main__":
