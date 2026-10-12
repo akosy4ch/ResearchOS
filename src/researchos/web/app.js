@@ -1168,6 +1168,56 @@ function metricsBlock(result, citationTargets) {
   const planned = result.research_strategy?.experimental_plan?.flatMap?.((phase) => Array.isArray(phase.metrics) ? phase.metrics : []) || [];
   return `<section class="detail-panel metric-evidence-panel"><div class="metric-evidence-heading"><div><span class="section-overline">MEASURES FOUND IN THE SOURCES</span><h2>Reported study metrics</h2></div><span class="metric-coverage-chip">${escapeHTML(coverageLine)}</span></div>${cards ? `<div class="reported-metric-grid">${cards}</div>` : `<div class="metric-empty">No metric names were explicit in the text available for this run. Open full texts or PDFs to check their methods and results tables.</div>`}<p class="metric-coverage-note">${escapeHTML(note)}</p>${planned.length ? `<div class="candidate-metric-block"><h3>Candidate metrics for your plan</h3><p>These are proposed evaluation measures, not metrics already reported by the retrieved papers.</p>${analysisValue(planned, citationTargets)}</div>` : ""}</section>`;
 }
+function evidenceMatrixBlock(matrix, comparisons, comparisonNote, citationTargets, coverage) {
+  const papers = Array.isArray(matrix) ? matrix : [];
+  const comparisonGroups = Array.isArray(comparisons) ? comparisons : [];
+  const rows = papers.map((paper, index) => {
+    const cells = (paper.cells || []).map((cell) => {
+      const evidence = Array.isArray(cell.evidence) ? cell.evidence : [];
+      const body = evidence.map((item) => {
+        const quote = item.evidence_quote ? `<blockquote>“${escapeHTML(item.evidence_quote)}”</blockquote>` : "";
+        const value = item.reported_metric
+          ? `<strong>${escapeHTML(item.reported_metric)}</strong>${item.reported_result ? ` · ${escapeHTML(item.reported_result)}` : " · result not stated"}`
+          : escapeHTML(item.value || "Not found in available text");
+        return `<div class="matrix-evidence-value">${value}${quote}<span>${escapeHTML(item.location || paper.evidence_kind || "Available text")}${item.source_label ? ` · ${escapeHTML(item.source_label)}` : ""}</span></div>`;
+      }).join("");
+      return `<article class="matrix-cell ${cell.status === "not_found" ? "matrix-cell-missing" : ""}"><h4>${escapeHTML(cell.label || analysisLabel(cell.aspect))}</h4>${body}</article>`;
+    }).join("");
+    const target = citationTargets?.get(paper.source_label) || paper.url || "";
+    const title = target ? `<a href="${escapeHTML(target)}" target="_blank" rel="noopener noreferrer">[${escapeHTML(paper.source_label || "SOURCE")}] ${escapeHTML(paper.title)} ↗</a>` : `<strong>[${escapeHTML(paper.source_label || "SOURCE")}] ${escapeHTML(paper.title)}</strong>`;
+    const found = (paper.cells || []).filter((cell) => cell.status === "evidence_found").length;
+    return `<details class="evidence-paper" ${index === 0 ? "open" : ""}><summary>${title}<span>${found}/${(paper.cells || []).length} facets · ${escapeHTML(paper.evidence_kind || "Abstract")}</span></summary><div class="matrix-grid">${cells}</div></details>`;
+  }).join("");
+  const groups = comparisonGroups.map((group) => `<article class="comparison-group"><div class="comparison-group-heading"><strong>${escapeHTML(group.metric || "Metric")}</strong><span>${escapeHTML(group.dataset || "dataset")}</span><span>same split and protocol</span></div><div class="comparison-results">${(group.results || []).map((item) => {
+    const target = citationTargets?.get(item.source_label) || item.url || "";
+    const name = target ? `<a href="${escapeHTML(target)}" target="_blank" rel="noopener noreferrer">[${escapeHTML(item.source_label || "SOURCE")}] ${escapeHTML(item.title || "Study")} ↗</a>` : escapeHTML(item.title || "Study");
+    return `<div><strong>${escapeHTML(item.reported_result || "Result not reported")}</strong>${name}<span>${escapeHTML(item.location || "Source passage")}</span></div>`;
+  }).join("")}</div><p>${escapeHTML(group.basis || "")}</p></article>`).join("");
+  const fullText = Number(coverage?.papers_analyzed_with_full_text || 0);
+  return `<section class="detail-panel evidence-matrix-panel"><div class="metric-evidence-heading"><div><span class="section-overline">PAPER-BY-PAPER EXTRACTION</span><h2>Study evidence matrix</h2></div><span class="metric-coverage-chip">${papers.length} papers · 13 facets · ${fullText} full texts</span></div><p class="metric-coverage-note">Every populated cell has an exact source quote and location. “Not found in available text” means this run could not verify the field; it does not mean the paper omitted it.</p><div class="evidence-paper-list">${rows || `<div class="metric-empty">No evidence matrix was produced. Attach a PDF or connect a local model to extract paper details.</div>`}</div><div class="comparison-panel"><div><span class="section-overline">LIKE-FOR-LIKE ONLY</span><h3>Comparable reported results</h3><p>${escapeHTML(comparisonNote || "Results are grouped only when metric, dataset, split, and protocol match.")}</p></div>${groups || `<div class="metric-empty">No cross-paper group passed the dataset, split, protocol, and metric match. Individual reported numbers remain in each paper’s matrix and are not ranked as SOTA.</div>`}</div></section>`;
+}
+function screeningBlock(run) {
+  const result = run.result || {};
+  const flow = result.prisma_flow || {};
+  const decisions = new Map((run.screening_decisions || []).map((item) => [item.paper_id, item]));
+  const papers = run.papers || [];
+  const stats = [
+    ["Index hits", flow.identified_records], ["Duplicates removed", flow.duplicates_removed],
+    ["Unique screened", flow.unique_records_screened], ["Topic exclusions", flow.excluded_by_topic_screen],
+    ["Outside run cap", flow.not_retained_by_run_cap], ["Included by you", flow.human_decisions?.include || 0],
+    ["Excluded by you", flow.human_decisions?.exclude || 0], ["Maybe", flow.human_decisions?.maybe || 0],
+  ].map(([label, value]) => `<div><strong>${escapeHTML(String(value ?? "—"))}</strong><span>${escapeHTML(label)}</span></div>`).join("");
+  const records = papers.map((paper) => {
+    const decision = decisions.get(paper.id) || {};
+    const reasonId = `screen-reason-${paper.id}`;
+    const target = paper.local_filename ? `/api/papers/${encodeURIComponent(paper.id)}/file` : (paper.url || (paper.doi ? `https://doi.org/${paper.doi}` : ""));
+    const title = target ? `<a href="${escapeHTML(target)}" target="_blank" rel="noopener noreferrer">${escapeHTML(paper.title || "Untitled record")} ↗</a>` : escapeHTML(paper.title || "Untitled record");
+    return `<details class="screen-record"><summary><span>${escapeHTML(decision.decision || "unreviewed")}</span><strong>${title}</strong><small>${escapeHTML(paper.year || "Year unknown")} · ${escapeHTML(paper.source || "Source")} · ${escapeHTML(paper.branch || "Search record")}</small></summary><form class="screen-record-form" data-screening-form data-run-id="${escapeHTML(run.id)}" data-paper-id="${escapeHTML(paper.id)}"><label>Decision<select name="decision"><option value="unreviewed" ${!decision.decision ? "selected" : ""}>Not reviewed</option><option value="include" ${decision.decision === "include" ? "selected" : ""}>Include</option><option value="exclude" ${decision.decision === "exclude" ? "selected" : ""}>Exclude</option><option value="maybe" ${decision.decision === "maybe" ? "selected" : ""}>Maybe</option></select></label><label>Reason for decision<textarea id="${reasonId}" name="reason" maxlength="500" rows="2" placeholder="Record why it fits, does not fit, or needs full-text review…">${escapeHTML(decision.reason || "")}</textarea></label><button class="secondary-button" type="submit">Save decision</button></form></details>`;
+  }).join("");
+  const log = result.search_log || {};
+  const searchSnapshot = `<details class="search-snapshot"><summary>Reproducible search log · ${escapeHTML(dateLabel(log.searched_at || result.generated_at))}</summary><div class="search-snapshot-body"><p>Providers: ${escapeHTML((log.providers || []).join(" · ") || "Crossref · Europe PMC · OpenAlex")} · Model: ${escapeHTML(log.model || "not recorded")} · Ranking: ${escapeHTML(log.ranking_method || "not recorded")}</p>${(log.branches || []).map((branch) => `<div><strong>${escapeHTML(branch.name || "Branch")}</strong><code>${escapeHTML(branch.query || "")}</code><span>${escapeHTML(Object.entries(branch.provider_hit_counts || {}).map(([name, count]) => `${name}: ${count}`).join(" · "))}</span>${(branch.errors || []).length ? `<span>${escapeHTML(branch.errors.join("; "))}</span>` : ""}</div>`).join("")}</div></details>`;
+  return `<section class="detail-panel screening-panel"><div class="metric-evidence-heading"><div><span class="section-overline">REVIEW TRAIL</span><h2>Screen and reproduce this search</h2></div><span class="metric-coverage-chip">${papers.length} retained records</span></div><p class="metric-coverage-note">Search results are broad candidates. Include, exclude, or mark records maybe; exclusions require a reason. The flow counts are PRISMA-style run bookkeeping, not a claim that this run is a completed systematic review.</p><div class="screening-stats">${stats}</div>${searchSnapshot}<details class="screen-record-list"><summary>Review retained records · ${papers.length}</summary><div>${records || `<div class="metric-empty">No records are available for screening.</div>`}</div></details><div class="screening-empty-note">These decisions are saved for an auditable screening pass. This report stays as generated; the synthesis is not silently rewritten when a decision changes.</div><div class="screening-empty-note">${escapeHTML(flow.note || "This run records the exact queries, sources, duplicates, screening, and retention limits.")}</div></section>`;
+}
 function formatChatContent(value, citationTargets) {
   const safe = escapeHTML(value).replace(/\[(P\d+)\]/g, (label, citation) => {
     const target = citationTargets.get(citation);
@@ -1270,7 +1320,7 @@ async function loadRunDetail(id, { background = false } = {}) {
     const reportReady = run.status === "completed" || run.status === "partial";
     await loadReportChat(id, reportReady, citationTargets);
     if (state.detailRunId !== id) return;
-    const revision = JSON.stringify([run.id, run.status, run.progress, run.stage, run.updated_at, run.result, run.papers, run.claims, run.events]);
+    const revision = JSON.stringify([run.id, run.status, run.progress, run.stage, run.updated_at, run.result, run.papers, run.claims, run.events, run.screening_decisions]);
     if (background && alreadyVisible && state.lastDetailRevision === revision) return;
     if (background && alreadyVisible && document.activeElement?.matches("[data-scope-answer]")) return;
     const scrollY = window.scrollY;
@@ -1286,7 +1336,7 @@ async function loadRunDetail(id, { background = false } = {}) {
     const eventsHTML = events.map((event) => `<div class="event-row"><span class="event-dot"></span><div class="event-copy"><strong>${escapeHTML(event.agent)} · ${escapeHTML(event.stage)}</strong>${escapeHTML(event.message)}</div></div>`).join("");
     const sourceErrors = result.search?.source_errors || [];
     $("#run-detail-content").innerHTML = `<div class="detail-header"><div class="detail-header-top"><div class="eyebrow"><span class="eyebrow-line"></span> ${running ? "TEAM IN PROGRESS" : "RESEARCH JOURNAL"}</div><div class="detail-header-actions">${reportReady ? `<button class="secondary-button" type="button" data-jump-report-chat>Ask this report ↓</button>` : ""}<a class="secondary-button report-download" href="/api/runs/${encodeURIComponent(run.id)}/report.md">Download report ↓</a></div></div><h1>${escapeHTML(run.question)}</h1><div class="detail-meta"><span>${escapeHTML(dateLabel(run.created_at))}</span><span>${papers.length} papers saved</span><span>${result.model_available ? "Local model analysis" : "Search and metadata"}</span></div><div class="progress-track"><span style="width:${Math.max(3, Number(run.progress || 0))}%"></span></div>${running ? `<div class="run-meta" style="margin-top:8px">Current stage: ${escapeHTML(run.stage)} · ${run.progress}%</div>` : ""}${run.error ? `<div class="run-meta" style="margin-top:8px;color:#a45d4c">${escapeHTML(run.error)}</div>` : ""}</div>
-      <div class="detail-grid"><div style="display:grid;gap:12px"><section class="detail-panel"><h2>Research synthesis</h2><div class="detail-summary">${escapeHTML(result.executive_summary || (running ? "Your research team is searching public scholarly indexes. This report will update as each stage completes." : "The run finished without a synthesis."))}</div></section>${analysisBlock("Research brief", run.brief, citationTargets)}${analysisBlock("Research map", researchMap, citationTargets)}${clarifyingQuestionsBlock(result.clarifying_questions, run)}${literatureReviewBlock(result.paper_appraisals, result.paper_appraisal_coverage, result.search, result.pdfs, result.generated_at || run.updated_at, citationTargets, run)}
+      <div class="detail-grid"><div style="display:grid;gap:12px"><section class="detail-panel"><h2>Research synthesis</h2><div class="detail-summary">${escapeHTML(result.executive_summary || (running ? "Your research team is searching public scholarly indexes. This report will update as each stage completes." : "The run finished without a synthesis."))}</div></section>${analysisBlock("Research brief", run.brief, citationTargets)}${analysisBlock("Research map", researchMap, citationTargets)}${clarifyingQuestionsBlock(result.clarifying_questions, run)}${screeningBlock(run)}${literatureReviewBlock(result.paper_appraisals, result.paper_appraisal_coverage, result.search, result.pdfs, result.generated_at || run.updated_at, citationTargets, run)}${evidenceMatrixBlock(result.evidence_matrix, result.metric_comparisons, result.metric_comparison_note, citationTargets, result.full_text_coverage)}
       ${listBlock("Themes and synthesis", result.themes)}${listBlock("Contradictions to explore", result.contradictions)}${listBlock("Potential gaps · unconfirmed", result.research_gaps)}${studyDetailsBlock(result.study_details, result.study_details_coverage, citationTargets)}${metricsBlock(result, citationTargets)}${analysisBlock("Novelty assessment · provisional", result.novelty_analysis, citationTargets)}${analysisBlock("Impact and feasibility", result.impact_feasibility, citationTargets)}${analysisBlock("Research direction and publication readiness", result.research_strategy, citationTargets)}${listBlock("Suggested next steps", result.next_steps)}${claimsHTML}${listBlock("Limitations and open questions", result.limitations)}${listBlock("Reviewer notes", result.reviewer_notes)}${result.reviewer_issues?.length ? `<section class="detail-panel"><h2>Adversarial review</h2>${result.reviewer_issues.map((issue) => `<div class="claim-card"><span class="claim-verdict ${issue.severity === "critical" ? "reject" : ""}">${escapeHTML(issue.severity || "review")}</span><p style="margin-top:8px">${escapeHTML(issue.issue || "")}</p><div class="event-copy">Suggested action: ${escapeHTML(issue.action || "Review this conclusion against the source text.")}</div></div>`).join("")}</section>` : ""}</div>
       <div style="display:grid;align-content:start;gap:12px"><section class="detail-panel"><h2>Sources <span class="section-overline">${papers.length} RECORDS</span></h2>${paperList}${papers.length > 20 ? `<div class="event-copy">Showing first 20 source links. Open Paper library for the full retained set.</div>` : ""}</section><section class="detail-panel"><h2>Agent journal</h2>${eventsHTML || `<div class="event-copy">Agent updates will appear here.</div>`}</section>${sourceErrors.length ? `<section class="detail-panel"><h2>Source availability</h2><ul class="detail-list">${sourceErrors.map((item) => `<li>${escapeHTML(item)}</li>`).join("")}</ul></section>` : ""}</div></div>`;
     state.lastDetailRevision = revision;
@@ -1426,6 +1476,25 @@ $("#run-detail-content").addEventListener("input", (event) => {
   state.scopeRefinement.answers[Number(event.target.dataset.scopeAnswer)] = event.target.value;
 });
 $("#run-detail-content").addEventListener("submit", (event) => {
+  if (event.target.matches("[data-screening-form]")) {
+    event.preventDefault();
+    const form = event.target;
+    const fields = new FormData(form);
+    const decision = String(fields.get("decision") || "unreviewed");
+    const reason = String(fields.get("reason") || "").trim();
+    if (decision === "exclude" && !reason) { toast("Add a short reason before excluding this record.", "error"); form.elements.reason.focus(); return; }
+    const button = form.querySelector("button[type=submit]");
+    if (button) { button.disabled = true; button.textContent = "Saving…"; }
+    const path = "/api/runs/" + encodeURIComponent(form.dataset.runId) + "/screening/" + encodeURIComponent(form.dataset.paperId);
+    api(path, { method: "POST", body: JSON.stringify({ decision, reason }) }).then(async () => {
+      toast("Screening decision saved.");
+      await loadRunDetail(form.dataset.runId, { background: true });
+    }).catch((error) => {
+      toast("Could not save screening decision: " + error.message, "error");
+      if (button?.isConnected) { button.disabled = false; button.textContent = "Save decision"; }
+    });
+    return;
+  }
   if (!event.target.matches("[data-refine-run]")) return;
   event.preventDefault();
   refineRunFromAnswers(event.target);

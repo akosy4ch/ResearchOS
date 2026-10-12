@@ -43,20 +43,20 @@ FastAPI application ---- Local job/checkpoint store (SQLite)
       +---- Model provider interface ---- LM Studio or MLX-LM local endpoint
 ```
 
-The workflow has a hard cap on search branches, provider results, retained source links, model calls, time, and revision cycles. Candidate metadata is gathered into an in-memory pool and deduplicated; only the bounded retained records enter the run library, and newly fetched abstracts are persisted only for the papers sent to local analysis. Store each stage result as structured JSON so interrupted jobs can resume without silently rerunning everything.
+The workflow has a hard cap on search branches, provider results, retained source links, full-text articles, model calls, time, and revision cycles. Candidate metadata is gathered into an in-memory pool and deduplicated before the lexical topic screen; only the bounded retained records enter the run library, and newly fetched abstracts are persisted only for the papers sent to local analysis. A run snapshot stores exact queries, per-provider counts/errors, search time, duplicate/topic/cap counts, ranking, limits, and configured model. No full Europe PMC XML is persisted; up to three selected analyzed articles are passed through its REST fullTextXML endpoint only after an explicit adaptation-permitting CC license is confirmed, then bounded section/table/caption passages are cleared from memory when the workflow ends.
 
 ## Workflow and review gates
 
 1. **Interview**: Save a structured Research Brief; the interviewer surfaces only questions whose answers could change the search or evaluation. In the current build, runs continue with visible open questions; pausing and resuming after user answers is planned.
 2. **Plan**: Convert the brief into a research map, inclusion/exclusion rules, and bounded search tasks.
 3. **Search**: Query Crossref, Europe PMC, and OpenAlex by distinct subtopic. Save query, source, timestamp, and result count. Do not use general web search.
-4. **Screen**: Deduplicate by DOI, normalized title, and source identifiers. Record include/exclude decisions and reasons.
-5. **Read**: Prefer user-supplied PDFs or open-access full text. Extract local PDF text page by page. Label abstract-only records and do not infer details unavailable in the text.
+4. **Screen**: Deduplicate by DOI or normalized title before topic screening. Record reversible researcher include/exclude/maybe decisions and reasons for retained records; preserve a PRISMA-style operational flow and disclose records beyond the cap.
+5. **Read**: Prefer user-supplied PDFs or selected Europe PMC OA full text with an explicit adaptation-permitting CC license. Extract local PDF text page by page and bounded remote section/table/caption passages in memory. Label abstract-only records and do not infer details unavailable in the text.
 
 Optional user-supplied web pages must use HTTPS and a hostname in `TRUSTED_WEB_DOMAINS` (`researchos/web_reader.py`). Redirects outside that allowlist are blocked too. This explicit domain allowlist constrains which pages are fetched; it is not a claim that every page is peer reviewed or that its contents are safe instructions. Treat fetched page text as untrusted evidence, never as workflow instructions. PDFs are user-provided local files and remain a separate source path.
-6. **Extract**: Create paper facts and candidate claims with exact supporting excerpts and page/section when available.
+6. **Extract**: Fill a 13-facet paper evidence matrix and candidate claims with exact supporting excerpts and page/section/table locations when available. Missing facets explicitly say whether they were not found in available text or not assessed because no extractor ran.
 7. **Verify**: A separate pass checks that a source exists and that the excerpt supports the claim in context. Keep contradictory evidence.
-8. **Synthesize**: Build themes and comparisons from verified evidence. Mark system inferences as synthesis, not as a paper's result.
+8. **Synthesize**: Build themes and comparisons from verified evidence. Metric groups require the same metric, dataset, split, and evaluation protocol; otherwise results remain paper-specific. Mark system inferences as synthesis, not as a paper's result.
 9. **Review**: Search for missing branches, unsupported claims, citation mismatches, weak comparisons, and overconfident gap statements. Permit a bounded targeted-search loop.
 10. **Write and audit**: Generate the report from verified records, then check every citation and every factual sentence against the evidence store.
 

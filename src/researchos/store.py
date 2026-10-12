@@ -114,6 +114,15 @@ def init_db() -> None:
                 message TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS run_screening_decisions (
+                run_id TEXT NOT NULL,
+                paper_id TEXT NOT NULL,
+                decision TEXT NOT NULL CHECK(decision IN ('include', 'exclude', 'maybe')),
+                reason TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(run_id, paper_id),
+                FOREIGN KEY(run_id, paper_id) REFERENCES run_papers(run_id, paper_id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS run_chat_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT NOT NULL REFERENCES research_runs(id) ON DELETE CASCADE,
@@ -145,6 +154,7 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_runs_project_created ON research_runs(project_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_papers_year ON papers(year DESC);
             CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, id);
+            CREATE INDEX IF NOT EXISTS idx_screening_run ON run_screening_decisions(run_id, decision);
             CREATE INDEX IF NOT EXISTS idx_run_chat_messages_run ON run_chat_messages(run_id, id);
             CREATE INDEX IF NOT EXISTS idx_paper_analyses_paper ON paper_analyses(paper_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_passages_paper_page ON passages(paper_id, page_number);
@@ -238,6 +248,30 @@ def add_event(run_id: str, agent: str, stage: str, message: str) -> None:
             "INSERT INTO run_events(run_id, agent, stage, message, created_at) VALUES (?, ?, ?, ?, ?)",
             (run_id, agent, stage, message, now()),
         )
+
+
+def save_screening_decision(run_id: str, paper_id: str, decision: str, reason: str = "") -> dict[str, Any]:
+    if decision == "unreviewed":
+        with connect() as db:
+            db.execute("DELETE FROM run_screening_decisions WHERE run_id = ? AND paper_id = ?", (run_id, paper_id))
+        return {"run_id": run_id, "paper_id": paper_id, "decision": "unreviewed", "reason": ""}
+    timestamp = now()
+    with connect() as db:
+        db.execute(
+            "INSERT INTO run_screening_decisions(run_id, paper_id, decision, reason, updated_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(run_id, paper_id) DO UPDATE SET decision=excluded.decision, reason=excluded.reason, updated_at=excluded.updated_at",
+            (run_id, paper_id, decision, reason[:500], timestamp),
+        )
+    return {"run_id": run_id, "paper_id": paper_id, "decision": decision, "reason": reason[:500], "updated_at": timestamp}
+
+
+def list_screening_decisions(run_id: str) -> list[dict[str, Any]]:
+    with connect() as db:
+        return [dict(row) for row in db.execute(
+            "SELECT d.run_id, d.paper_id, d.decision, d.reason, d.updated_at, p.title, p.doi, p.source "
+            "FROM run_screening_decisions d JOIN papers p ON p.id=d.paper_id "
+            "WHERE d.run_id=? ORDER BY d.updated_at, p.title", (run_id,)
+        )]
 
 
 def list_run_chat_messages(run_id: str, limit: int = 200) -> list[dict[str, Any]]:
@@ -415,6 +449,16 @@ def get_run(run_id: str) -> dict[str, Any] | None:
             "LEFT JOIN paper_files ON paper_files.paper_id = papers.id WHERE run_papers.run_id = ? "
             "ORDER BY run_papers.relevance DESC, papers.year DESC", (run_id,)
         )]
+        result["screening_decisions"] = [dict(item) for item in db.execute(
+            "SELECT run_id, paper_id, decision, reason, updated_at FROM run_screening_decisions WHERE run_id = ?",
+            (run_id,),
+        )]
+        decision_counts = {decision: sum(1 for item in result["screening_decisions"] if item["decision"] == decision)
+                           for decision in ("include", "exclude", "maybe")}
+        prisma_flow = result["result"].get("prisma_flow")
+        if isinstance(prisma_flow, dict):
+            prisma_flow["human_decisions"] = decision_counts
+            prisma_flow["pending_human_decision"] = max(0, len(result["papers"]) - sum(decision_counts.values()))
         result["claims"] = [dict(c) for c in db.execute(
             "SELECT claims.*, papers.title AS paper_title, papers.source AS paper_source, papers.url AS paper_url "
             "FROM claims LEFT JOIN papers ON papers.id = claims.paper_id "

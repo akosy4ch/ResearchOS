@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     max_search_results_per_source: int = 20
     max_papers_per_run: int = 48
     max_analysis_papers: int = 12
+    max_open_access_fulltext_per_run: int = 3
 
     @property
     def database_path(self) -> Path:

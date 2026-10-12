@@ -37,7 +37,7 @@ class ResearchOSApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('id="view-project"', response.text)
         self.assertIn('id="help-dialog"', response.text)
-        self.assertIn("20261010-specter2-roles-2", response.text)
+        self.assertIn("20261012-evidence-review-1", response.text)
         self.assertIn('id="role-model-research"', response.text)
         self.assertIn('id="specter2-setup"', response.text)
         self.assertIn('id="model-role-memory-note"', response.text)
@@ -74,6 +74,29 @@ class ResearchOSApiTests(unittest.TestCase):
         response = self.client.get("/api/runs/not-a-real-run")
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "Research run was not found")
+
+    def test_researcher_can_screen_a_saved_record_with_an_auditable_reason(self) -> None:
+        project = store.project_list()[0]
+        run = store.create_run(project["id"], "Review studies about this research question")
+        paper_id = store.save_paper({"doi": "10.1234/screening", "title": "Screening candidate", "authors": [],
+                                     "year": 2025, "abstract": "A source abstract.", "source": "OpenAlex",
+                                     "source_id": "W-screening", "url": "https://doi.org/10.1234/screening",
+                                     "open_access_url": ""}, run["id"], "Core", 0.7)
+        store.update_run(run["id"], status="completed", stage="completed", progress=100,
+                         result={"prisma_flow": {"identified_records": 2, "human_decisions": {}}})
+        path = f"/api/runs/{run['id']}/screening/{paper_id}"
+        rejected = self.client.post(path, json={"decision": "exclude", "reason": "  "})
+        self.assertEqual(rejected.status_code, 422)
+        excluded = self.client.post(path, json={"decision": "exclude", "reason": "Wrong population"})
+        self.assertEqual(excluded.status_code, 200)
+        saved = self.client.get(f"/api/runs/{run['id']}").json()
+        self.assertEqual(saved["screening_decisions"][0]["decision"], "exclude")
+        self.assertEqual(saved["screening_decisions"][0]["reason"], "Wrong population")
+        self.assertEqual(saved["result"]["prisma_flow"]["human_decisions"]["exclude"], 1)
+        self.assertEqual(saved["result"]["prisma_flow"]["pending_human_decision"], 0)
+        reset = self.client.post(path, json={"decision": "unreviewed"})
+        self.assertEqual(reset.status_code, 200)
+        self.assertEqual(self.client.get(f"/api/runs/{run['id']}").json()["screening_decisions"], [])
 
     def test_report_chat_uses_saved_report_context_and_persists_the_conversation(self) -> None:
         project = store.project_list()[0]

@@ -25,20 +25,21 @@ This is a product checklist for a researcher using ResearchOS to move from a que
 ### P1 — systematic search and screening
 
 - Add review profiles: exploratory/narrative, scoping, and systematic. A systematic profile should require a protocol, eligibility rules, date/language limits, and planned databases before search.
-- Add a screening inbox with include/exclude/maybe decisions, reasons, duplicate provenance, and a flow summary. Preserve the pre-screen and post-screen counts.
-- Add a query log and exports for RIS, BibTeX, CSV, and a simple PRISMA-style flow record. Store links and chosen records; do not keep every unselected abstract forever.
+- Implemented: screening decisions for retained run records (include/exclude/maybe with reversible reasons), per-query/provider hit snapshots, duplicate counts, and a PRISMA-style operational flow. Search candidates outside the retention cap remain unsaved.
+- Still needed: exports for RIS, BibTeX, CSV, a standalone PRISMA-S checklist, and forward/backward citation chaining. Do not keep every unselected abstract forever.
 - Add citation chaining and trusted provider integrations only when each source can supply stable IDs, transparent provenance, and a clear license/usage path.
 
 ### P2 — stronger evidence extraction
 
-- Prefer lawful open full text or a user-provided PDF. Add OCR for scanned files, section/table extraction, and figure-aware multimodal review as separately labeled passes.
+- Implemented: selected Europe PMC OA full-text passages with an explicit adaptation-permitting CC license, plus bounded section/table/caption extraction. A user-provided PDF remains the fallback; figure captions are never treated as image interpretation.
+- Still needed: OCR for scanned files, page-image input to an explicitly selected vision model, researcher-editable corrections, and extraction evaluation against a gold set.
 - Turn the paper dossier into a researcher-editable extraction sheet. Save reviewer corrections and distinguish paper text, OCR, model interpretation, and user notes.
 - Add study-level risk-of-bias prompts appropriate to the field and design. Make the rubric visible and never imply an official clinical or methodological assessment unless the user selected that rubric.
-- Add a comparison matrix with units, denominators, confidence intervals, data splits, and protocol notes, so numbers from unlike experiments are not presented as direct comparisons.
+- Implemented: a per-paper 13-facet evidence matrix with exact quotes and conservative comparison groups that require the same metric, dataset, split, and protocol. Values and units stay source-reported; denominators and uncertainty are facets to inspect in the matrix.
 
 ### P3 — reproducibility and evaluation
 
-- Snapshot each run's exact queries, provider timestamps, paper identifiers, model/runtime/quantization, task role, prompt/schema version, source text coverage, and user decisions.
+- Implemented: each run snapshots query branches, provider-level counts and errors, search time, deduplication, topic terms, ranking, retention/analysis limits, configured model, and researcher decisions. Still add runtime/quantization identity, prompt/schema version, and per-record inclusion/exclusion reasons for automated lexical screens.
 - Build a small human-reviewed benchmark from real questions: retrieval recall/precision at top-k, duplicate handling, relevance by field, exact-quote support, extraction accuracy, and report usefulness. Compare lexical-only and hybrid ranking before changing defaults.
 - Add resumable stage checkpoints, cancellation, stale-job recovery, and per-stage cost in time, memory, and model calls.
 - Add a local project export/import bundle with the SQLite database, selected PDFs, reports, citation data, and a manifest. Keep automatic backups easy to restore.

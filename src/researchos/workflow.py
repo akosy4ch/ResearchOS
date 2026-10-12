@@ -5,11 +5,14 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from researchos import store
 from researchos.agents import (CHECK_SYSTEM, EXTRACT_SYSTEM, IMPACT_FEASIBILITY_SYSTEM, LEAD_SYSTEM,
                                NOVELTY_SYSTEM, REVIEW_SYSTEM, STRATEGY_SYSTEM, SYNTH_SYSTEM,
                                parse_json, paper_context)
 from researchos.config import settings
+from researchos.fulltext import fetch_open_access_fulltext, locate_fulltext_quote
 from researchos.providers.local_openai import LocalOpenAIProvider
 from researchos.search import search_branch
 from researchos.web_reader import read_public_page
@@ -111,6 +114,143 @@ def balance_search_results(branches: list[tuple[str, list[dict[str, Any]]]],
                     score = topic_relevance_score(paper, topic_terms) if topic_terms else 0.5
                     balanced.append((paper, branch_name, score))
     return balanced
+
+
+def paper_identity_key(paper: dict[str, Any]) -> str:
+    doi = str(paper.get("doi") or "").casefold().removeprefix("https://doi.org/")
+    if doi:
+        return f"doi:{doi}"
+    title = " ".join(str(paper.get("title") or "").casefold().split())
+    return f"title:{title}"
+
+
+def merge_index_record(target: dict[str, Any], candidate: dict[str, Any], branch: str) -> None:
+    source = str(candidate.get("source") or "")
+    if source and source not in target.setdefault("sources", []):
+        target["sources"].append(source)
+    target.setdefault("search_branches", [])
+    if branch not in target["search_branches"]:
+        target["search_branches"].append(branch)
+    for field in ("doi", "abstract", "url", "open_access_url", "pmcid", "journal", "publisher", "volume", "issue", "pages", "year"):
+        value = candidate.get(field)
+        existing = target.get(field)
+        if value and (not existing or (field == "abstract" and len(str(value)) > len(str(existing)))):
+            target[field] = value
+    target["is_open_access"] = bool(target.get("is_open_access") or candidate.get("is_open_access"))
+    if source == "Europe PMC" and candidate.get("pmcid") and candidate.get("is_open_access"):
+        target["fulltext_source"] = "Europe PMC"
+    if not target.get("authors") and candidate.get("authors"):
+        target["authors"] = candidate["authors"]
+
+
+def source_text(paper: dict[str, Any]) -> str:
+    return str(paper.get("evidence_text") or paper.get("abstract") or "")
+
+
+def source_location(paper: dict[str, Any], quote: str) -> str:
+    if paper.get("source") == "User PDF":
+        return store.find_passage_location(paper["id"], quote)
+    if paper.get("source") == "Web page":
+        return "Public web page excerpt"
+    if paper.get("full_text_passages"):
+        return locate_fulltext_quote(paper, quote)
+    return "Abstract"
+
+
+MATRIX_ASPECTS = [
+    ("study_design", "Study design"), ("cohort_or_dataset", "Cohort or dataset"),
+    ("sample_size", "Sample size"), ("preprocessing", "Preprocessing"),
+    ("model_architecture", "Model architecture"), ("baselines", "Baselines"),
+    ("data_splits", "Data splits"), ("experimental_protocol", "Experimental protocol"),
+    ("metrics", "Reported metrics"), ("statistical_tests", "Uncertainty or statistical tests"),
+    ("ablations", "Ablations"), ("limitations", "Stated limitations"),
+    ("reproducibility", "Reproducibility details"),
+]
+
+
+def build_evidence_matrix(papers: list[dict[str, Any]], details: list[dict[str, Any]],
+                          metrics: list[dict[str, Any]], labels: dict[str, str],
+                          extraction_available: bool = True) -> list[dict[str, Any]]:
+    aliases = {"dataset": "cohort_or_dataset", "sample": "sample_size", "baseline": "baselines",
+               "data_split": "data_splits", "evaluation_protocol": "experimental_protocol",
+               "experimental_setup": "experimental_protocol", "method": "model_architecture",
+               "limitation": "limitations", "statistical_test": "statistical_tests",
+               "uncertainty": "statistical_tests"}
+    result = []
+    for paper in papers:
+        paper_id = paper["id"]
+        facts: dict[str, list[dict[str, Any]]] = {}
+        for item in details:
+            if item.get("paper_id") != paper_id:
+                continue
+            aspect = aliases.get(item.get("aspect"), item.get("aspect"))
+            facts.setdefault(aspect, []).append(item)
+        metric_facts = [item for item in metrics if item.get("paper_id") == paper_id]
+        cells = []
+        for aspect, title in MATRIX_ASPECTS:
+            matching = metric_facts if aspect == "metrics" else facts.get(aspect, [])
+            if matching:
+                evidence = [{"value": item.get("reported_result") or item.get("metric") or item.get("value") or item.get("evidence_quote") or "Reported in source",
+                             "evidence_quote": item.get("evidence_quote", ""),
+                             "location": item.get("location", "Exact source passage"),
+                             "source_label": labels.get(paper_id, ""),
+                             "reported_metric": item.get("metric", ""),
+                             "reported_result": item.get("reported_result", "")}
+                            for item in matching]
+                status = "evidence_found"
+            else:
+                missing_value = "Not found in available text" if extraction_available else "Not assessed — extractor unavailable"
+                evidence = [{"value": missing_value, "evidence_quote": "",
+                             "location": paper.get("evidence_kind", "Available source text"),
+                             "source_label": labels.get(paper_id, "")}]
+                status = "not_found" if extraction_available else "not_assessed"
+            cells.append({"aspect": aspect, "label": title, "status": status, "evidence": evidence})
+        result.append({"paper_id": paper_id, "source_label": labels.get(paper_id, ""),
+                       "title": paper.get("title", ""), "year": paper.get("year"),
+                       "source": paper.get("source", ""), "evidence_kind": paper.get("evidence_kind", "Abstract"),
+                       "url": paper.get("full_text_url") or paper.get("url", ""), "cells": cells})
+    return result
+
+
+def comparable_metric_groups(metrics: list[dict[str, Any]], matrix: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def normalized(value: Any) -> str:
+        return " ".join(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
+
+    context: dict[str, dict[str, str]] = {}
+    for paper in matrix:
+        fields = {}
+        for cell in paper["cells"]:
+            if cell["aspect"] not in {"cohort_or_dataset", "data_splits", "experimental_protocol"}:
+                continue
+            evidence = cell["evidence"]
+            if evidence and evidence[0].get("evidence_quote"):
+                fields[cell["aspect"]] = normalized(evidence[0].get("value") or evidence[0].get("evidence_quote"))
+        context[paper["paper_id"]] = fields
+    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for item in metrics:
+        result = str(item.get("reported_result") or "").strip()
+        metric = normalized(item.get("metric"))
+        if not metric or not re.search(r"\d", result):
+            continue
+        fields = context.get(item.get("paper_id"), {})
+        dataset, split, protocol = (fields.get("cohort_or_dataset", ""), fields.get("data_splits", ""),
+                                    fields.get("experimental_protocol", ""))
+        if not dataset or not split or not protocol:
+            continue
+        grouped.setdefault((metric, dataset, split, protocol), []).append(item)
+    groups = []
+    for key, values in grouped.items():
+        if len({item.get("paper_id") for item in values}) < 2:
+            continue
+        groups.append({"metric": values[0].get("metric", ""), "dataset": values[0].get("dataset") or key[1],
+                       "data_split": values[0].get("data_split") or key[2],
+                       "evaluation_protocol": values[0].get("evaluation_protocol") or key[3],
+                       "basis": "Same normalized metric, dataset, split, and evaluation-protocol excerpts were found.",
+                       "results": [{"paper_id": item.get("paper_id"), "source_label": item.get("source_label"),
+                                    "title": item.get("title"), "reported_result": item.get("reported_result"),
+                                    "evidence_quote": item.get("evidence_quote"), "location": item.get("location"),
+                                    "url": item.get("url")} for item in values]})
+    return groups
 
 
 async def optional_completion(provider: LocalOpenAIProvider, system: str, prompt: str,
@@ -229,16 +369,37 @@ async def run_research(run_id: str, project_id: str, question: str, web_urls: li
             source_errors.extend(errors)
             searchable_branches.append((branch["name"], papers))
         search_hits_count = sum(len(papers) for _, papers in searchable_branches)
-        screened_out_search_hits = 0
-        topical_branches: list[tuple[str, list[dict[str, Any]]]] = []
+        branch_search_log = []
+        unique_index: dict[str, dict[str, Any]] = {}
+        for branch, result in zip(branches, branch_results):
+            if isinstance(result, Exception):
+                branch_search_log.append({"name": branch["name"], "query": branch["query"], "purpose": branch["purpose"],
+                                          "provider_hit_counts": {"Crossref": 0, "Europe PMC": 0, "OpenAlex": 0},
+                                          "errors": [type(result).__name__]})
+                continue
+            papers, errors = result
+            counts = {provider: sum(1 for paper in papers if paper.get("source") == provider)
+                      for provider in ("Crossref", "Europe PMC", "OpenAlex")}
+            branch_search_log.append({"name": branch["name"], "query": branch["query"], "purpose": branch["purpose"],
+                                      "provider_hit_counts": counts, "total_hits": len(papers), "errors": errors})
         for branch_name, papers in searchable_branches:
-            relevant_papers = []
             for paper in papers:
-                if topic_relevance_score(paper, topic_terms) > 0:
-                    relevant_papers.append(paper)
+                key = paper_identity_key(paper)
+                if key not in unique_index:
+                    source = str(paper.get("source") or "")
+                    unique_index[key] = {**paper, "sources": [source] if source else [], "search_branches": [branch_name]}
                 else:
-                    screened_out_search_hits += 1
-            topical_branches.append((branch_name, relevant_papers))
+                    merge_index_record(unique_index[key], paper, branch_name)
+        screened_out_search_hits = 0
+        topical_branches = [(branch["name"], []) for branch in branches]
+        branch_lookup = {name: papers for name, papers in topical_branches}
+        for paper in unique_index.values():
+            if topic_relevance_score(paper, topic_terms) > 0:
+                branch_name = next((name for name in paper.get("search_branches", []) if name in branch_lookup),
+                                   branches[0]["name"])
+                branch_lookup[branch_name].append(paper)
+            else:
+                screened_out_search_hits += 1
         ranking_method = "balanced scholarly-index order"
         if store.get_app_setting("specter2_enabled") == "true":
             from researchos.paper_ranker import dependency_status, rank_papers
@@ -308,10 +469,44 @@ async def run_research(run_id: str, project_id: str, question: str, web_urls: li
         for index, (paper, branch_name, score) in enumerate(records[:analysis_limit]):
             item = dict(paper)
             item["id"] = paper.get("id") or paper_ids[index]
+            item["evidence_kind"] = "Abstract"
             papers_for_model.append(item)
+        fulltext_count = 0
+        fulltext_candidates = [paper for paper in papers_for_model
+                               if paper.get("fulltext_source", paper.get("source")) == "Europe PMC"
+                               and paper.get("is_open_access") and paper.get("pmcid")]
+        if fulltext_candidates and settings.max_open_access_fulltext_per_run > 0:
+            update(run_id, "full_text", 36,
+                   f"Checking Europe PMC's documented full-text API and explicit reuse license for up to {min(settings.max_open_access_fulltext_per_run, len(fulltext_candidates))} analyzed papers.",
+                   "Evidence Extractor")
+            try:
+                async with httpx.AsyncClient(timeout=35, follow_redirects=True) as fulltext_client:
+                    for paper in fulltext_candidates[:settings.max_open_access_fulltext_per_run]:
+                        try:
+                            fulltext = await fetch_open_access_fulltext(paper, fulltext_client)
+                        except Exception as exc:
+                            source_errors.append(f"Europe PMC full text ({paper.get('pmcid')}): {type(exc).__name__}")
+                            continue
+                        if not fulltext:
+                            continue
+                        paper["full_text_passages"] = fulltext["passages"]
+                        paper["evidence_text"] = "\n\n".join(
+                            f"[{passage['locator']}] {passage['text']}" for passage in fulltext["passages"])
+                        paper["evidence_kind"] = f"Europe PMC full text · {fulltext['license']} · {len(fulltext['passages'])} passages"
+                        paper["full_text_license"] = fulltext["license"]
+                        paper["full_text_license_statement"] = fulltext["license_statement"]
+                        paper["full_text_url"] = fulltext["url"]
+                        paper["full_text_tables"] = fulltext["tables"]
+                        paper["full_text_figure_captions"] = fulltext["figures"]
+                        fulltext_count += 1
+                if fulltext_count:
+                    store.add_event(run_id, "Evidence Extractor", "full_text",
+                                    f"Used bounded Europe PMC full-text passages for {fulltext_count} paper(s) with an explicit adaptation-permitting Creative Commons license. Full text was analyzed in memory; only quoted evidence and provenance are kept in the report.")
+            except Exception as exc:
+                source_errors.append(f"Europe PMC full text: {type(exc).__name__}")
         citation_labels_by_id = {paper["id"]: f"P{index + 1}" for index, paper in enumerate(papers_for_model)}
         extraction = await optional_completion(provider, EXTRACT_SYSTEM,
-                                               paper_context(papers_for_model, analysis_limit), 5200)
+                                               paper_context(papers_for_model, analysis_limit), 8200)
         extraction_data = parse_json(extraction or "") or {}
         candidates = extraction_data.get("claims", []) if isinstance(extraction_data, dict) else []
         validated_claims = []
@@ -321,10 +516,9 @@ async def run_research(run_id: str, project_id: str, question: str, web_urls: li
             paper = next((p for p in papers_for_model if p["id"] == candidate.get("paper_id")), None)
             quote = str(candidate.get("evidence_quote", "")).strip()
             claim = str(candidate.get("claim", "")).strip()
-            source_text = (paper.get("evidence_text") or paper.get("abstract", "")) if paper else ""
-            if paper and claim and quote and quote.casefold() in source_text.casefold():
-                location = store.find_passage_location(paper["id"], quote) if paper.get("source") == "User PDF" else (
-                    "Public web page excerpt" if paper.get("source") == "Web page" else "Abstract")
+            source_text_value = source_text(paper) if paper else ""
+            if paper and claim and quote and quote.casefold() in source_text_value.casefold():
+                location = source_location(paper, quote)
                 validated_claims.append({"paper_id": paper["id"], "title": paper["title"], "claim": claim,
                                          "evidence_quote": quote, "limitation": str(candidate.get("limitation", "")),
                                          "source": paper.get("source", ""), "url": paper.get("url", ""),
@@ -341,14 +535,14 @@ async def run_research(run_id: str, project_id: str, question: str, web_urls: li
         extracted_metrics = extraction_data.get("study_metrics", []) if isinstance(extraction_data, dict) else []
         study_metrics: list[dict[str, Any]] = []
         if isinstance(extracted_metrics, list):
-            for candidate in extracted_metrics[:48]:
+            for candidate in extracted_metrics[:analysis_limit * 16]:
                 if not isinstance(candidate, dict):
                     continue
                 paper = next((p for p in papers_for_model if p["id"] == candidate.get("paper_id")), None)
                 quote = str(candidate.get("evidence_quote", "")).strip()
                 metric = str(candidate.get("metric", "")).strip()
-                source_text = (paper.get("evidence_text") or paper.get("abstract", "")) if paper else ""
-                if not paper or not metric or not quote or quote.casefold() not in source_text.casefold():
+                source_text_value = source_text(paper) if paper else ""
+                if not paper or not metric or not quote or quote.casefold() not in source_text_value.casefold():
                     continue
                 study_metrics.append({
                     "metric": metric[:180],
@@ -358,7 +552,10 @@ async def run_research(run_id: str, project_id: str, question: str, web_urls: li
                     "source_label": citation_labels_by_id.get(paper["id"], ""),
                     "paper_id": paper["id"], "title": paper.get("title", ""),
                     "year": paper.get("year"), "source": paper.get("source", ""),
-                    "url": paper.get("url") or (f"https://doi.org/{paper['doi']}" if paper.get("doi") else ""),
+                    "location": source_location(paper, quote),
+                    "evidence_kind": paper.get("evidence_kind", "Abstract"),
+                    "license": paper.get("full_text_license", ""),
+                    "url": paper.get("full_text_url") or paper.get("url") or (f"https://doi.org/{paper['doi']}" if paper.get("doi") else ""),
                 })
         citable_study_metrics = [
             {**{key: value for key, value in item.items() if key != "paper_id"},
@@ -369,41 +566,49 @@ async def run_research(run_id: str, project_id: str, question: str, web_urls: li
         store.add_event(run_id, "Evidence Extractor", "metrics",
                         f"Recorded {len(study_metrics)} explicitly named source metrics with exact matching quotes; rejected {rejected_metrics} unsupported metric entries.")
 
-        allowed_study_aspects = {"study_design", "dataset", "sample", "method", "baseline",
-                                 "experimental_setup", "evaluation_protocol", "limitation"}
+        allowed_study_aspects = {"study_design", "dataset", "sample", "preprocessing", "model_architecture",
+                                 "method", "baseline", "data_split", "experimental_setup", "evaluation_protocol",
+                                 "statistical_test", "uncertainty", "ablation", "limitation", "reproducibility"}
         raw_study_details = extraction_data.get("study_details", []) if isinstance(extraction_data, dict) else []
         study_details: list[dict[str, Any]] = []
         details_per_paper: dict[str, int] = {}
         seen_study_details: set[tuple[str, str, str]] = set()
         if isinstance(raw_study_details, list):
-            for candidate in raw_study_details[:72]:
+            for candidate in raw_study_details[:analysis_limit * 16]:
                 if not isinstance(candidate, dict):
                     continue
                 paper = next((p for p in papers_for_model if p["id"] == candidate.get("paper_id")), None)
                 aspect = str(candidate.get("aspect", "")).strip().casefold()
                 quote = str(candidate.get("evidence_quote", "")).strip()
-                source_text = (paper.get("evidence_text") or paper.get("abstract", "")) if paper else ""
-                if not paper or aspect not in allowed_study_aspects or not quote or quote.casefold() not in source_text.casefold():
+                source_text_value = source_text(paper) if paper else ""
+                if not paper or aspect not in allowed_study_aspects or not quote or quote.casefold() not in source_text_value.casefold():
                     continue
                 dedupe_key = (paper["id"], aspect, quote.casefold())
-                if dedupe_key in seen_study_details or details_per_paper.get(paper["id"], 0) >= 4:
+                if dedupe_key in seen_study_details or details_per_paper.get(paper["id"], 0) >= 16:
                     continue
                 seen_study_details.add(dedupe_key)
                 details_per_paper[paper["id"]] = details_per_paper.get(paper["id"], 0) + 1
-                location = store.find_passage_location(paper["id"], quote) if paper.get("source") == "User PDF" else (
-                    "Public web page excerpt" if paper.get("source") == "Web page" else "Abstract")
+                location = source_location(paper, quote)
                 study_details.append({
                     "aspect": aspect,
+                    "value": str(candidate.get("value", "")).strip()[:500],
                     "evidence_quote": quote[:1800],
                     "source_label": citation_labels_by_id.get(paper["id"], ""),
                     "paper_id": paper["id"], "title": paper.get("title", ""),
                     "year": paper.get("year"), "source": paper.get("source", ""),
+                    "evidence_kind": paper.get("evidence_kind", "Abstract"),
+                    "license": paper.get("full_text_license", ""),
                     "location": location,
-                    "url": paper.get("url") or (f"https://doi.org/{paper['doi']}" if paper.get("doi") else ""),
+                    "url": paper.get("full_text_url") or paper.get("url") or (f"https://doi.org/{paper['doi']}" if paper.get("doi") else ""),
                 })
         rejected_study_details = max(0, len(raw_study_details) - len(study_details)) if isinstance(raw_study_details, list) else 0
         store.add_event(run_id, "Evidence Extractor", "study_details",
                         f"Kept {len(study_details)} study-design and experiment excerpts with exact source-text matches; rejected {rejected_study_details} unsupported details.")
+        evidence_matrix = build_evidence_matrix(papers_for_model, study_details, study_metrics,
+                                                citation_labels_by_id, extraction_available=bool(extraction))
+        metric_comparisons = comparable_metric_groups(study_metrics, evidence_matrix)
+        store.add_event(run_id, "Evidence Extractor", "evidence_matrix",
+                        f"Built a {len(MATRIX_ASPECTS)}-facet evidence matrix for {len(evidence_matrix)} analyzed paper(s); unsupported or absent facets are explicitly marked not found in available text.")
 
         # Build an annotated bibliography from appraisals whose evidence quotes
         # exactly match source text. Missing facets are explicit so an abstract
@@ -420,14 +625,13 @@ async def run_research(run_id: str, project_id: str, question: str, web_urls: li
                 aspect = str(candidate.get("aspect", "")).strip().casefold()
                 assessment = str(candidate.get("assessment", "")).strip()
                 quote = str(candidate.get("evidence_quote", "")).strip()
-                source_text = (paper.get("evidence_text") or paper.get("abstract", "")) if paper else ""
+                source_text_value = source_text(paper) if paper else ""
                 key = (paper["id"], aspect) if paper else ("", "")
                 if (not paper or aspect not in allowed_appraisal_aspects or not assessment or not quote
-                        or quote.casefold() not in source_text.casefold() or key in seen_appraisals):
+                        or quote.casefold() not in source_text_value.casefold() or key in seen_appraisals):
                     continue
                 seen_appraisals.add(key)
-                location = store.find_passage_location(paper["id"], quote) if paper.get("source") == "User PDF" else (
-                    "Public web page excerpt" if paper.get("source") == "Web page" else "Abstract/source excerpt")
+                location = source_location(paper, quote)
                 paper_appraisals.append({
                     "aspect": aspect,
                     "assessment": assessment[:1000],
@@ -437,7 +641,7 @@ async def run_research(run_id: str, project_id: str, question: str, web_urls: li
                     "paper_id": paper["id"], "title": paper.get("title", ""),
                     "year": paper.get("year"), "source": paper.get("source", ""),
                     "location": location,
-                    "url": paper.get("url") or (f"https://doi.org/{paper['doi']}" if paper.get("doi") else ""),
+                    "url": paper.get("full_text_url") or paper.get("url") or (f"https://doi.org/{paper['doi']}" if paper.get("doi") else ""),
                 })
 
         default_appraisal = {
@@ -456,7 +660,7 @@ async def run_research(run_id: str, project_id: str, question: str, web_urls: li
                     "status": "not_assessable", "source_label": citation_labels_by_id.get(paper["id"], ""),
                     "paper_id": paper["id"], "title": paper.get("title", ""),
                     "year": paper.get("year"), "source": paper.get("source", ""),
-                    "location": "", "url": paper.get("url") or (f"https://doi.org/{paper['doi']}" if paper.get("doi") else ""),
+                    "location": "", "url": paper.get("full_text_url") or paper.get("url") or (f"https://doi.org/{paper['doi']}" if paper.get("doi") else ""),
                 })
         rejected_appraisals = max(0, len(raw_appraisals) - sum(item["status"] == "evidence_found" for item in paper_appraisals)) if isinstance(raw_appraisals, list) else 0
         store.add_event(run_id, "Paper Librarian", "appraisal",
@@ -594,6 +798,18 @@ async def run_research(run_id: str, project_id: str, question: str, web_urls: li
         synthesis["research_map"] = research_map
         synthesis["clarifying_questions"] = clarifying_questions
         synthesis["study_details"] = study_details
+        synthesis["evidence_matrix"] = evidence_matrix
+        synthesis["metric_comparisons"] = metric_comparisons
+        synthesis["metric_comparison_note"] = (
+            "Only records with the same metric, dataset, split, and evaluation-protocol excerpts are grouped for comparison. "
+            "Reported values and units remain as each source stated them."
+        )
+        synthesis["full_text_coverage"] = {
+            "papers_analyzed_with_full_text": fulltext_count,
+            "maximum_per_run": settings.max_open_access_fulltext_per_run,
+            "license_policy": "Europe PMC REST fullTextXML only; explicit CC0/CC-BY adaptation-permitting license required; bounded passages are analyzed in memory and the complete XML is not retained.",
+            "figure_policy": "Figure captions may be quoted; a figure is not interpreted unless its image is passed to a vision model.",
+        }
         synthesis["paper_appraisals"] = paper_appraisals
         synthesis["paper_appraisal_coverage"] = {
             "facet_count": len(paper_appraisals),
@@ -628,7 +844,8 @@ async def run_research(run_id: str, project_id: str, question: str, web_urls: li
         synthesis["model_available"] = model_analysis_available
         synthesis["citation_refs"] = [
             {"label": f"P{index + 1}", "paper_id": paper_ids[index], "title": paper.get("title"),
-             "doi": paper.get("doi"), "url": paper.get("url"), "source": paper.get("source"), "year": paper.get("year")}
+             "doi": paper.get("doi"), "url": paper.get("full_text_url") or paper.get("url"),
+             "source": paper.get("fulltext_source") or paper.get("source"), "year": paper.get("year")}
             for index, (paper, _, _) in enumerate(records[:analysis_limit])
         ]
         # Remove references outside the bounded source set and call out the audit finding.
@@ -725,15 +942,42 @@ async def run_research(run_id: str, project_id: str, question: str, web_urls: li
             "records_with_full_text": sum(bool(p.get("evidence_text") or p.get("abstract")) for p, _, _ in records[:analysis_limit]),
             "note": "This list includes only metrics explicitly named in the text available to this run. Abstract-only coverage can miss measures reported in full-text methods or tables.",
         }
+        indexed_retained = sum(1 for paper, _, _ in records if paper.get("source") not in {"User PDF", "Web page"})
+        eligible_index_records = max(0, len(unique_index) - screened_out_search_hits)
+        screening_decisions = store.list_screening_decisions(run_id)
+        manual_counts = {decision: sum(1 for item in screening_decisions if item.get("decision") == decision)
+                         for decision in ("include", "exclude", "maybe")}
+        synthesis["prisma_flow"] = {
+            "identified_records": search_hits_count,
+            "duplicates_removed": max(0, search_hits_count - len(unique_index)),
+            "unique_records_screened": len(unique_index),
+            "excluded_by_topic_screen": screened_out_search_hits,
+            "eligible_after_topic_screen": eligible_index_records,
+            "not_retained_by_run_cap": max(0, eligible_index_records - indexed_retained),
+            "retained_for_report": indexed_retained,
+            "note": "PRISMA-style operational counts for this run. Topic screening is automated and lexical; records beyond the configured retention cap are not saved. Human decisions below apply to retained records.",
+            "human_decisions": manual_counts,
+        }
+        synthesis["search_log"] = {
+            "searched_at": store.now(), "providers": ["Crossref", "Europe PMC", "OpenAlex"],
+            "branches": branch_search_log, "raw_hits_across_queries": search_hits_count,
+            "unique_index_records": len(unique_index), "duplicates_removed": max(0, search_hits_count - len(unique_index)),
+            "topic_terms": sorted(topic_terms), "ranking_method": ranking_method,
+            "retention_limit": settings.max_papers_per_run, "analysis_limit": analysis_limit,
+            "model": settings.model_name or "not configured",
+            "selection_policy": "Topic screen by title/abstract, then branch-balanced selection; no search-hit abstracts are saved for unselected records.",
+        }
         synthesis["search"] = {"branches": branches, "unique_papers": len(records), "source_errors": source_errors,
                                "candidate_hits": search_hits_count, "unique_candidates": len(unique_candidates),
                                "screened_out_hits": screened_out_search_hits,
-                               "topical_index_hits": search_hits_count - screened_out_search_hits,
+                               "duplicates_removed": max(0, search_hits_count - len(unique_index)),
+                               "topical_index_hits": eligible_index_records,
                                "screening_method": "Local topic-token overlap against titles, abstracts, attached PDF text, and the question/brief; a narrow allowance keeps adjacent Tor traffic-analysis and defense work. Clear mismatches are excluded before source links are retained.",
                                "ranking_method": ranking_method,
-                               "unique_index_candidates": sum(1 for paper, _, _ in unique_candidates
-                                                              if paper.get("source") not in {"User PDF", "Web page"}),
+                               "unique_index_candidates": len(unique_index),
                                "retained_source_links": len(records), "analysis_records": analysis_limit,
+                               "fulltext_records": fulltext_count,
+                               "records_not_retained_by_cap": max(0, eligible_index_records - indexed_retained),
                                "sources": ["Crossref", "Europe PMC", "OpenAlex", *( ["User-selected web pages"] if page_records else [] )],
                                "web_pages_read": len(page_records)}
         synthesis["pdfs"] = {"available_in_project": project_document_total,

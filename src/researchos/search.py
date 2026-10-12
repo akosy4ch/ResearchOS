@@ -151,6 +151,8 @@ async def search_europe_pmc(query: str, client: httpx.AsyncClient, limit: int | 
             "url": f"https://europepmc.org/article/MED/{item.get('id')}" if item.get("source") == "MED" else
                    (f"https://europepmc.org/article/PMC/{pmcid.removeprefix('PMC')}" if pmcid else (item.get("doi") and f"https://doi.org/{item['doi']}" or "")),
             "open_access_url": f"https://europepmc.org/articles/{pmcid}" if pmcid and item.get("isOpenAccess") == "Y" else "",
+            "pmcid": pmcid or "",
+            "is_open_access": item.get("isOpenAccess") == "Y",
             "journal": item.get("journalTitle", ""),
             "publisher": "",
             "volume": item.get("journalVolume", ""),
@@ -198,10 +200,11 @@ def merge_search_records(papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if source and source not in item["sources"]:
             item["sources"].append(source)
             item["source_ids"][source] = paper.get("source_id") or doi or title
-        for field in ("doi", "abstract", "url", "open_access_url", "journal", "publisher", "volume", "issue", "pages", "year"):
+        for field in ("doi", "abstract", "url", "open_access_url", "pmcid", "journal", "publisher", "volume", "issue", "pages", "year"):
             current, candidate = item.get(field), paper.get(field)
             if candidate and (not current or (field == "abstract" and len(str(candidate)) > len(str(current)))):
                 item[field] = candidate
+        item["is_open_access"] = bool(item.get("is_open_access") or paper.get("is_open_access"))
         if not item.get("authors") and paper.get("authors"):
             item["authors"] = paper["authors"]
     results = list(merged.values())

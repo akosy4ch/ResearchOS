@@ -105,6 +105,10 @@ class WorkflowRetentionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(completed["result"]["search"]["screened_out_hits"], 0)
                 self.assertEqual(completed["result"]["search"]["topical_index_hits"], 60)
                 self.assertEqual(completed["result"]["search"]["unique_candidates"], 60)
+                self.assertEqual(completed["result"]["search"]["duplicates_removed"], 0)
+                self.assertEqual(completed["result"]["prisma_flow"]["identified_records"], 60)
+                self.assertEqual(completed["result"]["prisma_flow"]["not_retained_by_run_cap"], 12)
+                self.assertEqual(completed["result"]["search_log"]["branches"][0]["query"], "test topic")
                 self.assertEqual(completed["result"]["metrics_coverage"]["metric_count"], 12)
                 self.assertTrue(all(item["evidence_quote"] == "We evaluated Dice segmentation score and sensitivity."
                                     for item in completed["result"]["study_metrics"]))
@@ -112,6 +116,12 @@ class WorkflowRetentionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(all(item["aspect"] == "evaluation_protocol" and
                                     item["evidence_quote"] == "We evaluated Dice segmentation score and sensitivity."
                                     for item in completed["result"]["study_details"]))
+                self.assertEqual(len(completed["result"]["evidence_matrix"]), 12)
+                self.assertEqual(len(completed["result"]["evidence_matrix"][0]["cells"]), 13)
+                missing_dataset = next(cell for cell in completed["result"]["evidence_matrix"][0]["cells"]
+                                      if cell["aspect"] == "cohort_or_dataset")
+                self.assertEqual(missing_dataset["evidence"][0]["value"], "Not found in available text")
+                self.assertEqual(completed["result"]["metric_comparisons"], [])
                 appraisal_coverage = completed["result"]["paper_appraisal_coverage"]
                 self.assertEqual(appraisal_coverage["records_analyzed"], 12)
                 self.assertEqual(appraisal_coverage["papers_with_assessments"], 12)
