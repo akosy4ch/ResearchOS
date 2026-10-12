@@ -92,6 +92,12 @@ class WorkflowRetentionTests(unittest.IsolatedAsyncioTestCase):
                            "year": 2024, "abstract": "We evaluated Dice segmentation score and sensitivity.",
                            "source": "OpenAlex", "source_id": f"W{index}", "url": f"https://doi.org/10.1234/example.{index}",
                            "open_access_url": ""} for index in range(60)]
+                papers.append({"doi": "10.1234/issue-metadata",
+                               "title": "Special Issue: Dice Segmentation Research",
+                               "authors": [], "year": 2024,
+                               "abstract": "We evaluated Dice segmentation score and sensitivity.",
+                               "source": "Europe PMC", "source_id": "PMC-ISSUE", "url": "https://example.org/issue",
+                               "open_access_url": "", "record_type": "journal-issue"})
                 with patch("researchos.workflow.LocalOpenAIProvider", return_value=FakeResearchProvider()), \
                      patch("researchos.workflow.search_branch", new_callable=AsyncMock, return_value=(papers, [])):
                     await run_research(run["id"], project["id"], run["question"], [], {})
@@ -101,12 +107,16 @@ class WorkflowRetentionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(completed["papers"]), 48)
                 retained_abstracts = sum(bool(paper["abstract"]) for paper in completed["papers"])
                 self.assertEqual(retained_abstracts, 12)
-                self.assertEqual(completed["result"]["search"]["candidate_hits"], 60)
+                self.assertEqual(completed["result"]["search"]["candidate_hits"], 61)
                 self.assertEqual(completed["result"]["search"]["screened_out_hits"], 0)
                 self.assertEqual(completed["result"]["search"]["topical_index_hits"], 60)
                 self.assertEqual(completed["result"]["search"]["unique_candidates"], 60)
                 self.assertEqual(completed["result"]["search"]["duplicates_removed"], 0)
-                self.assertEqual(completed["result"]["prisma_flow"]["identified_records"], 60)
+                self.assertEqual(completed["result"]["prisma_flow"]["identified_records"], 61)
+                self.assertEqual(completed["result"]["prisma_flow"]["unique_records_screened"], 61)
+                self.assertEqual(completed["result"]["prisma_flow"]["excluded_collection_metadata"], 1)
+                self.assertEqual(completed["result"]["search_log"]["excluded_collection_records"][0]["title"],
+                                 "Special Issue: Dice Segmentation Research")
                 self.assertEqual(completed["result"]["prisma_flow"]["not_retained_by_run_cap"], 12)
                 self.assertEqual(completed["result"]["search_log"]["branches"][0]["query"], "test topic")
                 self.assertEqual(completed["result"]["metrics_coverage"]["metric_count"], 12)

@@ -11,6 +11,26 @@ HEADERS = {"User-Agent": "ResearchOS/0.1 (local literature research assistant)"}
 _CROSSREF_LOCK = asyncio.Lock()
 _crossref_next_request_at = 0.0
 
+_COLLECTION_TYPES = {
+    "issue", "journal-issue", "journal issue", "journal-volume", "journal volume",
+    "proceedings-issue", "proceedings issue", "book-series", "book series",
+}
+_COLLECTION_TITLE = re.compile(
+    r"^\s*(?:special\s+issue\b|table\s+of\s+contents\b|front\s+matter\b|journal\s+issue\b)", re.I
+)
+
+
+def is_collection_level_record(paper: dict[str, Any]) -> bool:
+    """Identify issue/collection metadata that is not an individual research work."""
+    record_type = str(paper.get("record_type") or "").casefold().strip()
+    publication_types = paper.get("publication_types") or []
+    if isinstance(publication_types, str):
+        publication_types = [publication_types]
+    types = {record_type, *(str(value).casefold().strip() for value in publication_types)}
+    if types.intersection(_COLLECTION_TYPES):
+        return True
+    return bool(_COLLECTION_TITLE.match(str(paper.get("title") or "")))
+
 
 def _year(value: Any) -> int | None:
     try:
@@ -51,7 +71,7 @@ async def search_crossref(query: str, client: httpx.AsyncClient, limit: int | No
         response = await client.get(
             "https://api.crossref.org/works",
             params={"query.bibliographic": query, "rows": _result_limit(limit),
-                    "select": "DOI,title,author,published,issued,abstract,URL,type,container-title,publisher,volume,issue,page"},
+            "select": "DOI,title,author,published,issued,abstract,URL,type,container-title,publisher,volume,issue,page"},
             headers=HEADERS,
         )
         _crossref_next_request_at = time.monotonic() + 1.1
@@ -70,6 +90,7 @@ async def search_crossref(query: str, client: httpx.AsyncClient, limit: int | No
             "year": _year((date_parts[0] or [None])[0]),
             "abstract": _clean_abstract(item.get("abstract")),
             "source": "Crossref",
+            "record_type": str(item.get("type") or ""),
             "source_id": item.get("DOI", "") or item.get("URL", ""),
             "url": item.get("URL", ""),
             "open_access_url": "",
@@ -87,7 +108,7 @@ async def search_openalex(query: str, client: httpx.AsyncClient, limit: int | No
     response = await client.get(
         "https://api.openalex.org/works",
         params={"search": query, "per-page": _result_limit(limit),
-                "select": "id,doi,title,authorships,publication_year,abstract_inverted_index,primary_location,best_oa_location"},
+                "select": "id,doi,title,type,authorships,publication_year,abstract_inverted_index,primary_location,best_oa_location"},
         headers=HEADERS,
     )
     response.raise_for_status()
@@ -111,6 +132,7 @@ async def search_openalex(query: str, client: httpx.AsyncClient, limit: int | No
             "year": _year(item.get("publication_year")),
             "abstract": _clean_abstract(item.get("abstract_inverted_index")),
             "source": "OpenAlex",
+            "record_type": str(item.get("type") or ""),
             "source_id": item.get("id", "") or doi or title,
             "url": url,
             "open_access_url": best_oa_location.get("pdf_url") or "",
@@ -147,6 +169,9 @@ async def search_europe_pmc(query: str, client: httpx.AsyncClient, limit: int | 
             "year": _year(item.get("firstPublicationDate") or item.get("pubYear")),
             "abstract": _clean_abstract(item.get("abstractText")),
             "source": "Europe PMC",
+            "record_type": "; ".join(str(pub_type.get("type") or pub_type.get("value") or "")
+                                      for pub_type in item.get("pubTypeList", {}).get("pubType", [])
+                                      if isinstance(pub_type, dict)),
             "source_id": str(source_id),
             "url": f"https://europepmc.org/article/MED/{item.get('id')}" if item.get("source") == "MED" else
                    (f"https://europepmc.org/article/PMC/{pmcid.removeprefix('PMC')}" if pmcid else (item.get("doi") and f"https://doi.org/{item['doi']}" or "")),
@@ -200,7 +225,7 @@ def merge_search_records(papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if source and source not in item["sources"]:
             item["sources"].append(source)
             item["source_ids"][source] = paper.get("source_id") or doi or title
-        for field in ("doi", "abstract", "url", "open_access_url", "pmcid", "journal", "publisher", "volume", "issue", "pages", "year"):
+        for field in ("doi", "abstract", "url", "open_access_url", "pmcid", "journal", "publisher", "volume", "issue", "pages", "year", "record_type"):
             current, candidate = item.get(field), paper.get(field)
             if candidate and (not current or (field == "abstract" and len(str(candidate)) > len(str(current)))):
                 item[field] = candidate

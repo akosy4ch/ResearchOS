@@ -4,7 +4,7 @@ import unittest
 
 import httpx
 
-from researchos.search import search_openalex
+from researchos.search import is_collection_level_record, search_openalex
 from researchos.workflow import balance_search_results
 
 
@@ -18,6 +18,7 @@ class OpenAlexSearchTests(unittest.IsolatedAsyncioTestCase):
                     "id": "https://openalex.org/W123",
                     "doi": "https://doi.org/10.1234/example",
                     "title": "Uncertainty in image segmentation",
+                    "type": "article",
                     "authorships": [{"author": {"display_name": "A. Researcher"}}],
                     "publication_year": 2024,
                     "abstract_inverted_index": {"models": [1], "compare": [0], "uncertainty": [2]},
@@ -32,11 +33,17 @@ class OpenAlexSearchTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(papers), 1)
         self.assertEqual(papers[0]["source"], "OpenAlex")
+        self.assertEqual(papers[0]["record_type"], "article")
         self.assertEqual(papers[0]["doi"], "10.1234/example")
         self.assertEqual(papers[0]["authors"], ["A. Researcher"])
         self.assertEqual(papers[0]["abstract"], "compare models uncertainty")
         self.assertEqual(papers[0]["url"], "https://publisher.example/paper")
         self.assertEqual(papers[0]["open_access_url"], "https://repository.example/paper.pdf")
+
+    def test_filters_issue_level_records_but_keeps_regular_articles(self) -> None:
+        self.assertTrue(is_collection_level_record({"title": "Special Issue: EACR 2026 Congress"}))
+        self.assertTrue(is_collection_level_record({"title": "Cancer research collection", "record_type": "journal-issue"}))
+        self.assertFalse(is_collection_level_record({"title": "A cancer segmentation study", "record_type": "article"}))
 
 
 class SearchBalanceTests(unittest.TestCase):

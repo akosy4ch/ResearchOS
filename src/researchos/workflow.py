@@ -14,7 +14,7 @@ from researchos.agents import (CHECK_SYSTEM, EXTRACT_SYSTEM, IMPACT_FEASIBILITY_
 from researchos.config import settings
 from researchos.fulltext import fetch_open_access_fulltext, locate_fulltext_quote
 from researchos.providers.local_openai import LocalOpenAIProvider
-from researchos.search import search_branch
+from researchos.search import is_collection_level_record, search_branch
 from researchos.web_reader import read_public_page
 
 
@@ -390,6 +390,16 @@ async def run_research(run_id: str, project_id: str, question: str, web_urls: li
                     unique_index[key] = {**paper, "sources": [source] if source else [], "search_branches": [branch_name]}
                 else:
                     merge_index_record(unique_index[key], paper, branch_name)
+        unique_index_count = len(unique_index)
+        excluded_collection_records = [paper for paper in unique_index.values()
+                                       if is_collection_level_record(paper)]
+        unique_index = {key: paper for key, paper in unique_index.items()
+                        if not is_collection_level_record(paper)}
+        if excluded_collection_records:
+            store.add_event(
+                run_id, "Search Agents", "screening",
+                f"Excluded {len(excluded_collection_records)} issue-level or collection records that were not individual papers.",
+            )
         screened_out_search_hits = 0
         topical_branches = [(branch["name"], []) for branch in branches]
         branch_lookup = {name: papers for name, papers in topical_branches}
@@ -949,32 +959,42 @@ async def run_research(run_id: str, project_id: str, question: str, web_urls: li
                          for decision in ("include", "exclude", "maybe")}
         synthesis["prisma_flow"] = {
             "identified_records": search_hits_count,
-            "duplicates_removed": max(0, search_hits_count - len(unique_index)),
-            "unique_records_screened": len(unique_index),
+            "duplicates_removed": max(0, search_hits_count - unique_index_count),
+            "unique_records_screened": unique_index_count,
+            "excluded_collection_metadata": len(excluded_collection_records),
             "excluded_by_topic_screen": screened_out_search_hits,
             "eligible_after_topic_screen": eligible_index_records,
             "not_retained_by_run_cap": max(0, eligible_index_records - indexed_retained),
             "retained_for_report": indexed_retained,
-            "note": "PRISMA-style operational counts for this run. Topic screening is automated and lexical; records beyond the configured retention cap are not saved. Human decisions below apply to retained records.",
+            "note": "PRISMA-style operational counts for this run. Issue-level collection records and topic mismatches are screened out automatically; records beyond the configured retention cap are not saved. Human decisions below apply to retained records.",
             "human_decisions": manual_counts,
         }
         synthesis["search_log"] = {
             "searched_at": store.now(), "providers": ["Crossref", "Europe PMC", "OpenAlex"],
             "branches": branch_search_log, "raw_hits_across_queries": search_hits_count,
-            "unique_index_records": len(unique_index), "duplicates_removed": max(0, search_hits_count - len(unique_index)),
+            "unique_index_records": unique_index_count, "duplicates_removed": max(0, search_hits_count - unique_index_count),
+            "excluded_collection_records": [
+                {"title": str(paper.get("title") or "Untitled record")[:240],
+                 "source": str(paper.get("source") or "Scholarly index"),
+                 "record_type": str(paper.get("record_type") or "title pattern"),
+                 "reason": "Issue-level or collection record; not an individual paper."}
+                for paper in excluded_collection_records[:20]
+            ],
+            "excluded_collection_count": len(excluded_collection_records),
             "topic_terms": sorted(topic_terms), "ranking_method": ranking_method,
             "retention_limit": settings.max_papers_per_run, "analysis_limit": analysis_limit,
             "model": settings.model_name or "not configured",
-            "selection_policy": "Topic screen by title/abstract, then branch-balanced selection; no search-hit abstracts are saved for unselected records.",
+            "selection_policy": "Exclude issue-level collection records, screen topic by title/abstract, then select branch-balanced records; no search-hit abstracts are saved for unselected records.",
         }
         synthesis["search"] = {"branches": branches, "unique_papers": len(records), "source_errors": source_errors,
                                "candidate_hits": search_hits_count, "unique_candidates": len(unique_candidates),
                                "screened_out_hits": screened_out_search_hits,
-                               "duplicates_removed": max(0, search_hits_count - len(unique_index)),
+                               "duplicates_removed": max(0, search_hits_count - unique_index_count),
                                "topical_index_hits": eligible_index_records,
                                "screening_method": "Local topic-token overlap against titles, abstracts, attached PDF text, and the question/brief; a narrow allowance keeps adjacent Tor traffic-analysis and defense work. Clear mismatches are excluded before source links are retained.",
                                "ranking_method": ranking_method,
-                               "unique_index_candidates": len(unique_index),
+                               "unique_index_candidates": unique_index_count,
+                               "excluded_collection_records": len(excluded_collection_records),
                                "retained_source_links": len(records), "analysis_records": analysis_limit,
                                "fulltext_records": fulltext_count,
                                "records_not_retained_by_cap": max(0, eligible_index_records - indexed_retained),
