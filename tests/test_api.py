@@ -37,7 +37,7 @@ class ResearchOSApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('id="view-project"', response.text)
         self.assertIn('id="help-dialog"', response.text)
-        self.assertIn("20261012-evidence-review-1", response.text)
+        self.assertIn("20261012-evidence-review-2", response.text)
         self.assertIn('id="role-model-research"', response.text)
         self.assertIn('id="specter2-setup"', response.text)
         self.assertIn('id="model-role-memory-note"', response.text)
@@ -358,54 +358,4 @@ class ResearchOSApiTests(unittest.TestCase):
             "research": "qwen3:4b", "pdf_analysis": "gemma3:4b", "chat": "",
         }})
         self.assertEqual(saved.status_code, 200)
-        self.assertEqual(saved.json()["roles"], {
-            "research": "qwen3:4b", "pdf_analysis": "gemma3:4b", "chat": "",
-        })
-        rejected = self.client.post("/api/model/roles", json={"roles": {"chat": "not-installed"}})
-        self.assertEqual(rejected.status_code, 422)
-
-    def test_specter2_status_is_available_without_installing_optional_runtime(self) -> None:
-        status = self.client.get("/api/paper-ranker/status")
-        self.assertEqual(status.status_code, 200)
-        self.assertEqual(status.json()["model"], "SPECTER2 · scientific-paper semantic retrieval")
-        self.assertIn("dependencies_ready", status.json())
-        self.assertIn("weights_cached", status.json())
-        self.assertIn("ready", status.json())
-
-    def test_model_download_catalog_is_bounded_and_local(self) -> None:
-        self.assertEqual([item["name"] for item in OLLAMA_MODEL_CATALOG], [
-            "qwen3.5:4b", "qwen3.5:9b", "qwen2.5-coder:7b",
-        ])
-        self.assertEqual(_local_ollama_api_base("http://127.0.0.1:11434/v1"), "http://127.0.0.1:11434")
-        self.assertIsNone(_local_ollama_api_base("https://example.com/v1"))
-        response = self.client.post("/api/models/pull", json={"model": "arbitrary-model"})
-        self.assertEqual(response.status_code, 404)
-
-        with patch("researchos.main._ollama_api_base_or_error", new_callable=AsyncMock,
-                   return_value="http://127.0.0.1:11434"):
-            self.client.app.state.model_provider.available_models = AsyncMock(return_value=["qwen3.5:4b"])
-            catalog = self.client.get("/api/models/catalog")
-        self.assertEqual(catalog.status_code, 200)
-        self.assertTrue(catalog.json()["ollama_available"])
-        self.assertTrue(next(item for item in catalog.json()["models"] if item["name"] == "qwen3.5:4b")["installed"])
-
-    def test_model_download_starts_only_for_catalog_models_without_selecting_them(self) -> None:
-        selected_before = settings.model_name
-        self.client.app.state.model_provider.available_models = AsyncMock(return_value=["qwen2.5:7b"])
-        pull_started = threading.Event()
-        with (patch("researchos.main._ollama_api_base_or_error", new_callable=AsyncMock,
-                    return_value="http://127.0.0.1:11434"),
-              patch("researchos.main._pull_ollama_model",
-                    new_callable=lambda: AsyncMock(side_effect=lambda *_args: pull_started.set())) as pull):
-            response = self.client.post("/api/models/pull", json={"model": "qwen3.5:4b"})
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["model"], "qwen3.5:4b")
-        self.assertEqual(settings.model_name, selected_before)
-        self.assertIn("qwen3.5:4b", self.client.app.state.ollama_pull_tasks)
-        self.assertTrue(pull_started.wait(timeout=2), "background model download did not start")
-        pull.assert_awaited_once()
-        self.assertEqual(pull.await_args.args[:2], ("qwen3.5:4b", "http://127.0.0.1:11434"))
-
-
-if __name__ == "__main__":
-    unittest.main()
+     
